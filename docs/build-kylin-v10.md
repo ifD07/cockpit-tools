@@ -8,7 +8,7 @@
 
 ## 构建运行库
 
-宿主机需要 Python 3.8+、curl、Docker、Bubblewrap 和 xdg-dbus-proxy。Docker 只在构建时使用，日常启动不需要容器。安装阶段以普通桌面用户执行。
+宿主机需要 Python 3.8+、curl、Docker、Bubblewrap、xdg-dbus-proxy 和 `glib-compile-schemas`（libglib2.0-bin）。Docker 只在构建时使用，日常启动不需要容器。安装阶段以普通桌面用户执行。
 
 ```bash
 git clone https://github.com/ifD07/cockpit-tools.git
@@ -44,6 +44,26 @@ python3 scripts/kylin/install.py dist-kylin/runtime.tar.gz \
 
 主程序在宿主可见路径上保留启动包装脚本，在兼容命名空间内把该路径挂载为原始 ELF。这样应用自动登记的 OAuth / deep-link 回调和重启命令也会经过同一启动器，避免从浏览器回调时绕过运行库。
 
+安装器会重新编译宿主与运行库合并后的 GSettings XML，不能直接使用 Ubuntu 自带的编译缓存，否则麒麟独有的桌面配置项会丢失，可能导致被启动的 GTK 客户端崩溃。
+
+## Codex 客户端登录
+
+Codex / ChatGPT 桌面客户端应使用宿主运行库，不能继承 Cockpit 的私有 Ubuntu 库。配置原生可执行文件后，启动器仅在 Cockpit 的命名空间内将该路径映射到桥接脚本；桥接脚本恢复宿主根目录，再执行原始客户端。宿主上的客户端文件不被修改。宿主根目录镜像保留普通用户原有的读写权限，以便独立登录目录正常写入；这不是权限隔离机制。
+
+为已有安装修复配置并登记客户端：
+
+```bash
+python3 scripts/kylin/install.py \
+  --repair ~/.local/opt/cockpit-tools/1.3.74-kylin1 \
+  --codex-client /absolute/path/to/usr/lib/chatgpt/ChatGPT
+```
+
+将最后一个参数替换为本机客户端原生 ELF 的绝对路径。在 Cockpit 设置中，把 Codex 客户端路径设为同一路径，然后退出并重新打开 Cockpit。新安装也可在安装命令中附加 `--codex-client`。不要使用会强制覆盖 `CODEX_HOME` 或 `--user-data-dir` 的并行客户端启动脚本，否则临时登录会写入其他账号目录。
+
+桥接保留 Cockpit 生成的独立 `CODEX_HOME`、Electron 数据目录和启动参数，使用该客户端附带的 CLI；若安装目录提供 `compat/openssl/lib/libssl.so.3`，只为该客户端设置对应 OpenSSL 路径。麒麟旧 Mesa 默认使用 GTK3 并关闭 Electron GPU 加速。登录授权仍须由用户在新客户端中完成，不能仅以进程存在判定登录成功。
+
+仅修复 GSettings 缓存可使用 `--refresh-schemas PREFIX`。修复脚本不会修改 Cockpit 账号、客户端账号或系统库。
+
 海光旧 Mesa 环境默认使用软件渲染和 X11。若已验证硬件渲染稳定，可对单次启动设置：
 
 ```bash
@@ -72,4 +92,5 @@ bash -n scripts/kylin/build-runtime.sh
 - `scripts/kylin/build-runtime.sh`：下载校验、构建与导出。
 - `scripts/kylin/install.py`：校验归档、生成宿主资源合并视图、安装启动及菜单入口。
 - `scripts/kylin/launcher.py`：兼容命名空间、环境清理与依赖诊断。
+- `scripts/kylin/host-client.py`：宿主 Codex 客户端桥接，保留独立登录目录。
 - `scripts/kylin/test_runtime.py`：合并视图、归档边界、环境与桌面入口回归测试。

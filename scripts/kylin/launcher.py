@@ -14,6 +14,7 @@ import sys
 
 def runtime_environment(prefix, source=None):
     env = dict(os.environ if source is None else source)
+    env["COCKPIT_KYLIN_HOST_PATH"] = env.get("PATH", "/usr/local/bin:/usr/bin:/bin")
     # A launcher started by an Electron app can inherit its private OpenSSL.
     for key in ("LD_LIBRARY_PATH", "LD_PRELOAD", "OPENSSL_MODULES",
                 "GIO_EXTRA_MODULES", "GTK_PATH", "GTK_EXE_PREFIX",
@@ -34,7 +35,7 @@ def runtime_environment(prefix, source=None):
 def command(prefix, arguments, bwrap):
     with (prefix / "installation.json").open() as handle:
         installation = json.load(handle)
-    args = [bwrap, "--bind", "/", "/", "--ro-bind", "/", str(prefix / "host"),
+    args = [bwrap, "--bind", "/", "/", "--bind", "/", str(prefix / "host"),
             "--dev-bind", "/dev", "/dev"]
     for target in installation["mounts"]:
         args.extend(["--ro-bind", str(prefix / "merged" / target.lstrip("/")), target])
@@ -47,6 +48,11 @@ def command(prefix, arguments, bwrap):
     # from the host desktop without inheriting these private library mounts.
     app = prefix / "runtime/usr/bin/cockpit-tools"
     args.extend(["--ro-bind", str(app.with_name("cockpit-tools.real")), str(app)])
+    # Managed desktop clients need the host libraries, not Cockpit's ABI.
+    # Bind over their real executable only in this namespace; /proc/self/exe
+    # then retains the configured path after the bridge restores the host root.
+    for client in installation.get("hostClients", []):
+        args.extend(["--ro-bind", str(prefix / "host-client.py"), client])
     args.extend(["--", *arguments])
     return args
 

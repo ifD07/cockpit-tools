@@ -10,6 +10,7 @@ import shlex
 import shutil
 import subprocess
 import tarfile
+import tempfile
 
 
 def sha256(path):
@@ -23,7 +24,7 @@ def sha256(path):
 def merge_tree(host, runtime, target, mirror):
     """Prefer runtime files and retain host-only libraries and resources.
 
-    Host fallback links point at a read-only view of the original filesystem,
+    Host fallback links point at a view of the original filesystem,
     avoiding self-referential links after the merged directory is mounted.
     """
     target.mkdir(parents=True, exist_ok=True)
@@ -82,14 +83,79 @@ def desktop_exec(path):
     return '"' + escaped + '"'
 
 
+def rebuild_schema_cache(prefix, host_schemas=Path("/usr/share/glib-2.0/schemas")):
+    """Compile the merged XML set: a precompiled Ubuntu cache drops Kylin IDs."""
+    compiler = shutil.which("glib-compile-schemas")
+    if not compiler:
+        raise RuntimeError("Install the libglib2.0-bin package (glib-compile-schemas).")
+    runtime_schemas = prefix / "runtime/usr/share/glib-2.0/schemas"
+    merged_schemas = prefix / "merged/usr/share/glib-2.0/schemas"
+    if not runtime_schemas.is_dir() or not merged_schemas.is_dir():
+        raise RuntimeError("Not a Kylin runtime installation: " + str(prefix))
+    cache_dir = prefix / "gsettings"
+    cache_dir.mkdir(exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".schema-build-", dir=prefix) as directory:
+        stage = Path(directory)
+        # Match merge_tree's precedence, but compile every host-only schema too.
+        for source in (host_schemas, runtime_schemas):
+            for pattern in ("*.gschema.xml", "*.gschema.override", "*.enums.xml"):
+                for path in source.glob(pattern):
+                    shutil.copyfile(path, stage / path.name)
+        result = subprocess.run([compiler, "--strict", str(stage)], text=True,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        if result.returncode:
+            raise RuntimeError("GSettings schema compilation failed:\n" + result.stdout)
+        pending = cache_dir / "gschemas.compiled.new"
+        shutil.copyfile(stage / "gschemas.compiled", pending)
+        os.replace(pending, cache_dir / "gschemas.compiled")
+    pending_link = merged_schemas / ".gschemas.compiled.kylin"
+    pending_link.symlink_to(cache_dir / "gschemas.compiled")
+    os.replace(pending_link, merged_schemas / "gschemas.compiled")
+
+
+def install_launchers(prefix, source, codex_client=None):
+    metadata = prefix / "installation.json"
+    installation = json.loads(metadata.read_text())
+    if codex_client:
+        program = codex_client.resolve(strict=True)
+        with program.open("rb") as handle:
+            if handle.read(4) != b"\x7fELF":
+                raise ValueError("--codex-client must point to the native ELF, not a shell launcher")
+        if not os.access(program, os.X_OK):
+            raise ValueError("Codex client is not executable: " + str(program))
+        installation["hostClients"] = [str(program)]
+    for name in ("launcher.py", "host-client.py"):
+        pending = prefix / (name + ".new")
+        shutil.copy2(source / name, pending)
+        pending.chmod(0o755)
+        os.replace(pending, prefix / name)
+    pending = prefix / "installation.json.new"
+    pending.write_text(json.dumps(installation, indent=2) + "\n")
+    os.replace(pending, metadata)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("runtime", type=Path)
-    parser.add_argument("--sha256", required=True, help="SHA256 from the trusted build output")
+    parser.add_argument("runtime", type=Path, nargs="?")
+    parser.add_argument("--sha256", help="SHA256 from the trusted build output")
     parser.add_argument("--prefix", type=Path, help="New, unused installation directory")
+    parser.add_argument("--refresh-schemas", type=Path, help="Repair an existing installation's GSettings cache")
+    parser.add_argument("--codex-client", type=Path, help="Native Codex/ChatGPT ELF (not a parallel-profile launcher)")
+    parser.add_argument("--repair", type=Path, help="Update launchers and schemas of an existing installation")
     args = parser.parse_args()
     if os.geteuid() == 0:
         parser.error("Run this installer as the desktop user, without sudo.")
+    if args.refresh_schemas or args.repair:
+        prefix = (args.repair or args.refresh_schemas).resolve()
+        if not (prefix / "installation.json").is_file():
+            parser.error("Missing installation.json: " + str(prefix))
+        rebuild_schema_cache(prefix)
+        if args.repair:
+            install_launchers(prefix, Path(__file__).resolve().parent, args.codex_client)
+        print("Merged GSettings cache rebuilt:", prefix)
+        return
+    if not args.runtime or not args.sha256:
+        parser.error("runtime and --sha256 are required for a new installation.")
     if platform.machine() != "x86_64":
         parser.error("Only x86_64 / Hygon x86 is currently supported.")
     if not shutil.which("bwrap"):
@@ -121,8 +187,7 @@ def main():
         relative = target.lstrip("/")
         merge_tree(Path(target), runtime / relative, prefix / "merged" / relative,
                    prefix / "host" / relative)
-    shutil.copy2(source / "launcher.py", prefix / "launcher.py")
-    (prefix / "launcher.py").chmod(0o755)
+    rebuild_schema_cache(prefix)
     app = runtime / "usr/bin/cockpit-tools"
     app.rename(app.with_name("cockpit-tools.real"))
     app.write_text("#!/bin/sh\nexec " + shlex.quote(str(prefix / "launcher.py")) + ' "$@"\n')
@@ -131,6 +196,7 @@ def main():
         "upstream": upstream, "runtimeSha256": args.sha256, "mounts": mounts,
         "method": "bubblewrap-private-runtime", "systemLibrariesChanged": False,
     }, indent=2) + "\n")
+    install_launchers(prefix, source, args.codex_client)
     subprocess.run([str(prefix / "launcher.py"), "--kylin-check"], check=True)
     bin_dir = Path.home() / ".local/bin"
     bin_dir.mkdir(parents=True, exist_ok=True)
