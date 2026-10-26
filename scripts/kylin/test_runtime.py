@@ -23,6 +23,19 @@ host_client = load("host-client")
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_built_app_is_not_installed_without_verified_hash_and_elf(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            binary = root / "not-an-app"
+            binary.write_text("not an executable")
+            with self.assertRaises(ValueError):
+                installer.install_built_app(root, binary, None)
+            with self.assertRaises(ValueError):
+                installer.install_built_app(root, binary, "0" * 64)
+            with self.assertRaises(ValueError):
+                installer.install_built_app(root, binary, installer.sha256(binary))
+            self.assertFalse((root / "runtime").exists())
+
     def test_main_client_flags_are_not_classified_as_chromium_helpers(self):
         args = host_client.client_arguments(["--user-data-dir=/profile"])
         for word in ("gpu", "sandbox", "helper", "renderer", "utility", "crashpad"):

@@ -2167,12 +2167,18 @@ fn linux_process_env_value(pid: u32, key: &str) -> Option<String> {
 }
 
 #[cfg(target_os = "linux")]
-pub fn collect_codex_process_entries() -> Vec<(u32, Option<String>)> {
+fn collect_codex_process_entries_linux_checked() -> Result<Vec<(u32, Option<String>)>, String> {
     let expected_launch = resolve_expected_codex_launch_path_for_match();
-    if expected_launch.is_none() {
-        return Vec::new();
-    }
+    let expected = expected_launch.ok_or_else(||
+        "无法确认 Codex 客户端路径，已停止账号切换".to_string())?;
+    collect_codex_process_entries_linux_for_launch(&expected)
+}
 
+#[cfg(target_os = "linux")]
+fn collect_codex_process_entries_linux_for_launch(expected: &str) -> Result<Vec<(u32, Option<String>)>, String> {
+    use std::os::unix::fs::MetadataExt;
+    let own_uid = std::fs::metadata("/proc/self")
+        .map_err(|error| format!("无法核实当前用户的进程权限：{}", error))?.uid();
     let mut system = System::new();
     system.refresh_processes_specifics(
         sysinfo::ProcessesToUpdate::All,
@@ -2196,23 +2202,135 @@ pub fn collect_codex_process_entries() -> Vec<(u32, Option<String>)> {
         if name != "chatgpt" && !executable.ends_with("/chatgpt") {
             continue;
         }
-        let command_line = process
-            .cmd()
-            .iter()
-            .map(|value| value.to_string_lossy())
-            .collect::<Vec<_>>()
-            .join(" ");
-        let lower = command_line.to_ascii_lowercase();
-        if is_helper_command_line(&lower) || lower.contains("crashpad_handler") {
+        if std::fs::metadata(format!("/proc/{}", pid))
+            .is_ok_and(|metadata| metadata.uid() != own_uid) {
             continue;
         }
-        entries.push((pid, linux_process_env_value(pid, "CODEX_HOME")));
+        let stat = match std::fs::read_to_string(format!("/proc/{}/stat", pid)) {
+            Ok(stat) => stat,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return Err(format!("无法读取 Codex 进程 {} 的退出状态，已停止切换", pid)),
+        };
+        if !linux_pid_stat_is_live(&stat) {
+            continue;
+        }
+        let tokens = process
+            .cmd()
+            .iter()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        // Match Chromium process-type arguments, not arbitrary substrings in
+        // main-process flags such as --disable-gpu or --disable-setuid-sandbox.
+        if is_linux_chromium_helper_tokens(&tokens) {
+            continue;
+        }
+        let command_exe = tokens.first().map(|value| normalize_path_for_compare(value));
+        let matches = linux_codex_executable_matches(expected, &executable, command_exe.as_deref())
+            .map_err(|_| format!(
+                "无法核实 Codex 进程 {} 的可执行路径；请关闭该客户端后重试，未写入新账号", pid))?;
+        if !matches {
+            continue;
+        }
+        let home = match std::fs::read(format!("/proc/{}/environ", pid)) {
+            Ok(bytes) => bytes.split(|byte| *byte == 0).find_map(|entry| {
+                std::str::from_utf8(entry).ok()?.strip_prefix("CODEX_HOME=")
+                    .map(str::trim).filter(|value| !value.is_empty()).map(str::to_string)
+            }),
+            Err(_) if !is_pid_running(pid) => continue,
+            Err(error) => return Err(format!(
+                "无法读取 Codex 进程 {} 的账号目录：{}；已停止切换，未写入新账号", pid, error)),
+        };
+        entries.push((pid, home));
     }
 
-    filter_entries_by_expected_launch_path("Codex", entries, expected_launch)
-        .into_iter()
-        .filter(|(pid, _)| is_pid_running(*pid))
-        .collect()
+    Ok(entries)
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod linux_codex_process_scan_tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "subprocess fixture; launched only by unreadable_identity_blocks_scan"]
+    fn unreadable_client_fixture() {
+        let ready = std::env::var_os("COCKPIT_TEST_UNREADABLE_READY").expect("fixture only");
+        unsafe extern "C" { fn prctl(option: i32, ...) -> i32; }
+        std::fs::write("/proc/self/comm", "ChatGPT").unwrap();
+        assert_eq!(unsafe { prctl(4, 0usize) }, 0); // PR_SET_DUMPABLE=0
+        std::fs::write(ready, "ready").unwrap();
+        thread::sleep(Duration::from_secs(30));
+    }
+
+    #[test]
+    fn unreadable_identity_blocks_scan_instead_of_reporting_not_running() {
+        let directory = tempfile::tempdir().unwrap();
+        let ready = directory.path().join("ready");
+        let executable = std::env::current_exe().unwrap();
+        let mut child = Command::new(&executable)
+            .args(["--exact", "linux_codex_process_scan_tests::unreadable_client_fixture", "--ignored"])
+            .env("COCKPIT_TEST_UNREADABLE_READY", &ready)
+            .stdout(std::process::Stdio::null()).spawn().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !ready.exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        let result = collect_codex_process_entries_linux_for_launch(&executable.to_string_lossy());
+        let was_ready = ready.exists();
+        let _ = child.kill();
+        child.wait().unwrap();
+        assert!(was_ready, "unreadable identity fixture did not start");
+        // A privileged test builder can still inspect non-dumpable processes;
+        // an ordinary desktop user must receive an error rather than absence.
+        let privileged = std::fs::read_to_string("/proc/self/status").unwrap()
+            .lines().find(|line| line.starts_with("CapEff:"))
+            .and_then(|line| u64::from_str_radix(line.split_whitespace().nth(1)?, 16).ok())
+            .is_some_and(|caps| caps & (1 << 19) != 0);
+        if privileged {
+            assert!(result.unwrap().iter().any(|(pid, _)| *pid == child.id()));
+        } else {
+            assert!(result.is_err(), "unreadable live client must block auth mutation");
+        }
+    }
+
+    #[test]
+    fn scan_tracks_a_real_managed_client_and_confirms_its_exit() {
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("ChatGPT");
+        std::fs::copy("/bin/sleep", &executable).unwrap();
+        let profile = directory.path().join("isolated-profile");
+        let mut child = Command::new(&executable).arg("30")
+            .env("CODEX_HOME", &profile).spawn().unwrap();
+        let expected = executable.to_string_lossy();
+        let result = collect_codex_process_entries_linux_for_launch(&expected);
+        // Always reap this test's child, even if the scan assertion fails.
+        let _ = child.kill();
+        child.wait().unwrap();
+        let entries = result.unwrap();
+        assert!(entries.iter().any(|(pid, home)| *pid == child.id()
+            && home.as_deref() == profile.to_str()));
+        assert!(!is_pid_running(child.id()));
+        assert!(collect_codex_process_entries_linux_for_launch(&expected).unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_unreaped_exited_child_is_not_a_live_login_client() {
+        let mut child = Command::new("/bin/true").spawn().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while is_pid_running(child.id()) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        let running = is_pid_running(child.id());
+        child.wait().unwrap();
+        assert!(!running, "a zombie must not keep shutdown or login waiting");
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub fn collect_codex_process_entries() -> Vec<(u32, Option<String>)> {
+    collect_codex_process_entries_linux_checked().unwrap_or_else(|error| {
+        crate::modules::logger::log_warn(&format!("[Codex Resolve] {}", error));
+        Vec::new()
+    })
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
@@ -2455,14 +2573,8 @@ pub fn start_codex_with_args_and_env_and_egress(
             }
             thread::sleep(Duration::from_millis(200));
         }
-        if is_pid_running(spawned_pid) {
-            crate::modules::logger::log_warn(&format!(
-                "[Codex Start] Linux 实例启动后未读取到 CODEX_HOME，回退 spawn pid={}",
-                spawned_pid
-            ));
-            return Ok(spawned_pid);
-        }
-        return Err("Codex Linux 实例启动超时，未找到真实主进程".to_string());
+        return Err(format!(
+            "Codex Linux 实例启动超时，未确认账号目录和真实主进程（启动器 PID {} 不作为成功依据）", spawned_pid));
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]

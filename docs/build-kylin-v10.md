@@ -76,13 +76,33 @@ LIBGL_ALWAYS_SOFTWARE=0 ~/.local/bin/cockpit-tools
 
 ## 验证与更新
 
+### 切号退出检查的源码修复
+
+本分支还修正了 Linux 切号流程中的状态判断：进程路径或账号目录不可读取时不再当成“未运行”；辅助进程按 Chromium 参数识别，避免主进程启动参数被误判；僵尸进程不计为运行；关闭后重新扫描相同账号目录的客户端和 direct app-server，有残留就拒绝写入新账号。启动超时也不再把启动器 PID 当成真实客户端成功。
+
+这些 Rust 改动需要重新编译主程序，仅执行运行库安装器的 `--repair` 不会生效。前端构建后，在 Ubuntu 22.04 构建环境中安装 Rust、GTK3 / WebKitGTK 4.1 开发包，并执行 `COCKPIT_SKIP_CLIPROXY_BUILD=1 cargo build --locked --release -p cockpit-tools --features tauri/custom-protocol`；该选项要求已有对应目标的官方 sidecar。`tauri/custom-protocol` 用于把构建后的前端打进程序，不能以开发服务器模式交付。构建产物应先通过依赖检查，再安装到私有运行库，不替换系统库。
+
+退出 Cockpit 后，可用经过确认的本地构建替换主程序：
+
+```bash
+python3 scripts/kylin/install.py \
+  --repair ~/.local/opt/cockpit-tools/1.3.74-kylin1 \
+  --app-binary /absolute/path/to/target/release/cockpit-tools \
+  --app-sha256 VERIFIED_SHA256
+```
+
+安装器会校验哈希及真实运行库依赖，并保留按旧文件哈希命名的回退程序。切号验证需确认日志依次出现：旧客户端及后台退出、复核通过、新凭据写入、真实新客户端启动。不能只以进程存在或登录文件存在判断账号已在界面中生效。
+
 ```bash
 npm run test:kylin
+python3 scripts/kylin/test-linux-guard.py
 bash -n scripts/kylin/build-runtime.sh
 ~/.local/bin/cockpit-tools --kylin-check
 ```
 
 `--kylin-check` 使用私有动态加载器核验应用依赖，不会发送模型请求。实际桌面验证还应确认主窗口显示，应用日志出现“前端已就绪”，并检查 sidecar 与需管理的 IDE 能正常运行。仅进程存活不能证明前端可用。
+
+`test-linux-guard.py` 在上述 Rust 构建环境中运行，复用已编译的 sysinfo / tempfile 库，原样抽取生产扫描函数及测试，验证真实子进程账号目录、退出与僵尸状态、未知进程身份，以及 direct app-server 的精确安装路径和子进程归属。不需要启动 GUI，也不会访问或修改用户账号。
 
 2026-10-26 已在麒麟 V10 SP1 2403、Hygon C86-3G 实机完成安装和启动验证：主窗口显示为 1280 × 800，前端上报 `react_mounted`，deep-link 注册完成。主程序依赖检查通过；兼容环境内的宿主 git、Node.js、Python/SSL 均可执行。宿主 glibc 保持 2.31，应用使用私有 glibc 2.35。实际启动检查发现的 `/dev/null` 访问问题已通过显式 `--dev-bind /dev /dev` 修复，并加入回归测试。未代用户导入或切换 IDE 账号。
 

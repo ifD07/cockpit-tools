@@ -160,6 +160,37 @@ def rebuild_input_method_cache(prefix):
     os.replace(pending_link, merged_cache)
 
 
+def install_built_app(prefix, binary, expected_sha256):
+    if not expected_sha256 or sha256(binary) != expected_sha256.lower():
+        raise ValueError("Built app SHA256 mismatch (use --app-sha256)")
+    with binary.open("rb") as handle:
+        if handle.read(4) != b"\x7fELF":
+            raise ValueError("Built app must be an ELF executable")
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("kylin_launcher", prefix / "launcher.py")
+    launcher = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(launcher)
+    app = prefix / "runtime/usr/bin/cockpit-tools.real"
+    pending = app.with_name(app.name + ".new")
+    shutil.copy2(binary, pending)
+    pending.chmod(0o755)
+    loader = prefix / "runtime/usr/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2"
+    probe = subprocess.run(launcher.command(prefix, [str(loader), "--list", str(pending)],
+                           shutil.which("bwrap")), env=launcher.runtime_environment(prefix),
+                           text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    if probe.returncode or "not found" in probe.stdout:
+        raise RuntimeError("Built app dependency check failed:\n" + probe.stdout)
+    backup = app.with_name(app.name + ".backup-" + sha256(app)[:12])
+    if not backup.exists():
+        shutil.copy2(app, backup)
+    os.replace(pending, app)
+    metadata = prefix / "installation.json"
+    installation = json.loads(metadata.read_text())
+    installation["localBinarySha256"] = expected_sha256.lower()
+    metadata.write_text(json.dumps(installation, indent=2) + "\n")
+    print("Built app installed; rollback binary:", backup)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("runtime", type=Path, nargs="?")
@@ -168,6 +199,8 @@ def main():
     parser.add_argument("--refresh-schemas", type=Path, help="Repair an existing installation's GSettings cache")
     parser.add_argument("--codex-client", type=Path, help="Native Codex/ChatGPT ELF (not a parallel-profile launcher)")
     parser.add_argument("--repair", type=Path, help="Update launchers and schemas of an existing installation")
+    parser.add_argument("--app-binary", type=Path, help="Install a locally compiled app during --repair (exit Cockpit first)")
+    parser.add_argument("--app-sha256", help="SHA256 of --app-binary")
     args = parser.parse_args()
     if os.geteuid() == 0:
         parser.error("Run this installer as the desktop user, without sudo.")
@@ -179,6 +212,8 @@ def main():
         if args.repair:
             install_launchers(prefix, Path(__file__).resolve().parent, args.codex_client)
             rebuild_input_method_cache(prefix)
+            if args.app_binary:
+                install_built_app(prefix, args.app_binary.resolve(), args.app_sha256)
         print("Merged GSettings cache rebuilt:", prefix)
         return
     if not args.runtime or not args.sha256:
