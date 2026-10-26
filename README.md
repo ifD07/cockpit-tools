@@ -375,6 +375,8 @@ Grok CLI 默认实例通常直接沿用官方 `~/.grok` 目录，启动时不设
 Windows 便携包解压后直接运行其中的 `Cockpit Tools.exe`（或同名主程序）。系统需要 Windows 10/11 的 Microsoft Edge WebView2 Runtime；账号和配置仍按当前 Windows 用户目录保存，不会随 ZIP 文件夹自动迁移。
 *   **Linux**: `.deb` (Debian/Ubuntu)、`.rpm` 或 `.AppImage` (通用)
 
+麒麟 V10 SP1 2403（海光 / x86_64）不能直接使用上述 Linux 安装包：系统的 glibc 2.31 与 WebKitGTK 4.0 不满足当前版本要求。本分支提供用户目录独立运行库安装方式，详见 [麒麟 V10 安装与适配说明](docs/build-kylin-v10.md)。
+
 ### 选项 B: Homebrew 安装 (macOS)
 
 > 需要先安装 Homebrew。

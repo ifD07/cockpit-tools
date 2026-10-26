@@ -53,3 +53,7 @@ docs/plugin-architecture-proposal.md
 .qoder/
 
 sidecars/mihomo/bin/
+
+# Kylin compatibility runtime build output
+dist-kylin/
+scripts/kylin/__pycache__/

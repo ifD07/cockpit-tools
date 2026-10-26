@@ -352,10 +352,8 @@ fn start_codex_default_internal(
             }
             thread::sleep(Duration::from_millis(200));
         }
-        if is_pid_running(spawned_pid) {
-            return Ok(spawned_pid);
-        }
-        return Err("Codex Linux 默认实例启动超时，未找到真实主进程".to_string());
+        return Err(format!(
+            "Codex Linux 默认实例启动超时，未确认真实主进程（启动器 PID {} 不作为成功依据）", spawned_pid));
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
@@ -836,6 +834,47 @@ pub fn restart_codex_default(extra_args: &[String], timeout_secs: u64) -> Result
 }
 
 /// 关闭受管 Codex 实例（按 CODEX_HOME 匹配，包含默认实例目录）
+#[cfg(target_os = "linux")]
+fn verify_codex_profiles_stopped_linux(
+    targets: &HashSet<String>, default_home: &str,
+) -> Result<(), String> {
+    // Rescan instead of just checking the original PIDs: a launcher or app
+    // watchdog may have created a replacement while shutdown was in progress.
+    let mut remaining = collect_codex_process_entries_linux_checked()?
+        .into_iter()
+        .filter_map(|(pid, home)| {
+            let home = home.as_deref().map(normalize_path_for_compare)
+                .unwrap_or_else(|| default_home.to_string());
+            targets.contains(&home).then_some(pid)
+        }).collect::<Vec<_>>();
+    let executable = resolve_codex_launch_path()?.parent()
+        .ok_or_else(|| "无法确认 Codex 后台程序目录".to_string())?
+        .join("resources/codex").to_string_lossy().to_string();
+    // A backend left behind by an earlier failed shutdown may no longer be a
+    // descendant of a desktop main process. Refuse to overwrite its profile.
+    for entry in collect_codex_process_tree_entries()? {
+        if !is_pid_running(entry.pid)
+            || !is_codex_direct_app_server_command_line(&entry.command_line, &executable) {
+            continue;
+        }
+        let bytes = std::fs::read(format!("/proc/{}/environ", entry.pid))
+            .map_err(|_| format!("无法确认 Codex 后台进程 {} 的账号归属，已停止切换", entry.pid))?;
+        let home = bytes.split(|byte| *byte == 0).find_map(|value|
+            std::str::from_utf8(value).ok()?.strip_prefix("CODEX_HOME=")
+                .map(normalize_path_for_compare).filter(|value| !value.is_empty()))
+            .unwrap_or_else(|| default_home.to_string());
+        if targets.contains(&home) {
+            remaining.push(entry.pid);
+        }
+    }
+    if remaining.is_empty() {
+        crate::modules::logger::log_info("[Codex Close] 已复核旧客户端退出，允许提交新账号");
+        Ok(())
+    } else {
+        Err(format!("Codex 旧客户端仍在运行（PID {:?}），已停止切换，未写入新账号", remaining))
+    }
+}
+
 pub fn close_codex_instances(codex_homes: &[String], timeout_secs: u64) -> Result<(), String> {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
@@ -856,6 +895,9 @@ pub fn close_codex_instances(codex_homes: &[String], timeout_secs: u64) -> Resul
                 .to_string_lossy()
                 .to_string(),
         );
+        #[cfg(target_os = "linux")]
+        let entries = collect_codex_process_entries_linux_checked()?;
+        #[cfg(not(target_os = "linux"))]
         let entries = collect_codex_process_entries();
         let mut pids: Vec<u32> = entries
             .iter()
@@ -875,6 +917,8 @@ pub fn close_codex_instances(codex_homes: &[String], timeout_secs: u64) -> Resul
         pids.sort();
         pids.dedup();
         if pids.is_empty() {
+            #[cfg(target_os = "linux")]
+            verify_codex_profiles_stopped_linux(&target_homes, &default_home)?;
             crate::modules::logger::log_info("受管 Codex 实例未在运行，无需关闭");
             return Ok(());
         }
@@ -904,6 +948,8 @@ pub fn close_codex_instances(codex_homes: &[String], timeout_secs: u64) -> Resul
                 let remaining = collect_running_pids(&pids);
                 if remaining.is_empty() {
                     close_captured_codex_direct_app_servers(&direct_app_server_pids, timeout_secs)?;
+                    #[cfg(target_os = "linux")]
+                    verify_codex_profiles_stopped_linux(&target_homes, &default_home)?;
                     crate::modules::logger::log_info(&format!(
                         "[Codex Close] graceful close finished, targets={}",
                         summarize_pid_list_for_log(&pids)
@@ -942,6 +988,8 @@ pub fn close_codex_instances(codex_homes: &[String], timeout_secs: u64) -> Resul
         if still_running {
             return Err("无法关闭受管 Codex 实例进程，请手动关闭后重试".to_string());
         }
+        #[cfg(target_os = "linux")]
+        verify_codex_profiles_stopped_linux(&target_homes, &default_home)?;
         return Ok(());
     }
 

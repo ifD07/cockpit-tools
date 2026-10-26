@@ -3182,7 +3182,17 @@ pub fn is_pid_running(pid: u32) -> bool {
         }
         true
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    {
+        // /proc retains zombies until their parent reaps them. They cannot
+        // execute or own an active login session and must not extend a wait.
+        let stat = match std::fs::read_to_string(format!("/proc/{}/stat", pid)) {
+            Ok(stat) => stat,
+            Err(error) => return error.kind() != std::io::ErrorKind::NotFound,
+        };
+        return linux_pid_stat_is_live(&stat);
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         let mut system = System::new();
         system.refresh_processes_specifics(
