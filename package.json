@@ -7,6 +7,8 @@
     "dev": "vite",
     "test": "node scripts/run_ts_tests.cjs",
     "test:release": "node --test scripts/release/*.test.cjs",
+    "test:kylin": "python3 -m unittest discover -s scripts/kylin -p 'test_*.py' -v",
+    "kylin:build-runtime": "bash scripts/kylin/build-runtime.sh",
     "proxy-engine:prepare": "node scripts/prepare-proxy-engine.cjs",
     "proxy-engine:bundle-config": "node scripts/proxy-engine-bundle-config.cjs",
     "test:go": "cd sidecars/cockpit-cliproxy && go test ./...",
