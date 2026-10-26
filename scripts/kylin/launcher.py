@@ -14,6 +14,10 @@ import sys
 
 def runtime_environment(prefix, source=None):
     env = dict(os.environ if source is None else source)
+    # Cockpit and the default managed desktop must agree on ~/.codex.
+    # Do not inherit a parent Electron launcher's parallel account directories.
+    env.pop("CODEX_HOME", None)
+    env.pop("CODEX_ELECTRON_USER_DATA_PATH", None)
     env["COCKPIT_KYLIN_HOST_PATH"] = env.get("PATH", "/usr/local/bin:/usr/bin:/bin")
     # A launcher started by an Electron app can inherit its private OpenSSL.
     for key in ("LD_LIBRARY_PATH", "LD_PRELOAD", "OPENSSL_MODULES",

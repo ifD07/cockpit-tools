@@ -31,6 +31,16 @@ def host_environment(prefix, program, source):
     return env
 
 
+def client_arguments(arguments):
+    arguments = list(arguments)
+    # Broad helper matching in Cockpit 1.3.74 rejects main-process flags that
+    # contain "gpu" or "sandbox". GTK3 + SwiftShader needs neither flag.
+    for flag in ("--gtk-version=3", "--use-gl=swiftshader"):
+        if flag not in arguments:
+            arguments.append(flag)
+    return arguments
+
+
 def main():
     prefix = Path(os.environ["COCKPIT_KYLIN_RUNTIME"])
     on_host = sys.argv[1:2] == ["--on-host"]
@@ -45,11 +55,7 @@ def main():
                 str(prefix / "host-client.py"), "--on-host", str(program), *sys.argv[1:]]
         os.execv(args[0], args)
     env = host_environment(prefix, program, os.environ)
-    arguments = sys.argv[3:]
-    # Kylin V10's GTK and older Mesa require the GTK3/software path.
-    for flag in ("--gtk-version=3", "--disable-setuid-sandbox", "--disable-gpu"):
-        if flag not in arguments:
-            arguments.append(flag)
+    arguments = client_arguments(sys.argv[3:])
     os.execve(str(program), [str(program), *arguments], env)
 
 

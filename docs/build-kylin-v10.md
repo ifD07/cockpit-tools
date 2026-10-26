@@ -60,7 +60,11 @@ python3 scripts/kylin/install.py \
 
 将最后一个参数替换为本机客户端原生 ELF 的绝对路径。在 Cockpit 设置中，把 Codex 客户端路径设为同一路径，然后退出并重新打开 Cockpit。新安装也可在安装命令中附加 `--codex-client`。不要使用会强制覆盖 `CODEX_HOME` 或 `--user-data-dir` 的并行客户端启动脚本，否则临时登录会写入其他账号目录。
 
-桥接保留 Cockpit 生成的独立 `CODEX_HOME`、Electron 数据目录和启动参数，使用该客户端附带的 CLI；若安装目录提供 `compat/openssl/lib/libssl.so.3`，只为该客户端设置对应 OpenSSL 路径。麒麟旧 Mesa 默认使用 GTK3 并关闭 Electron GPU 加速。登录授权仍须由用户在新客户端中完成，不能仅以进程存在判定登录成功。
+桥接保留 Cockpit 生成的独立 `CODEX_HOME`、Electron 数据目录和启动参数，使用该客户端附带的 CLI；若安装目录提供 `compat/openssl/lib/libssl.so.3`，只为该客户端设置对应 OpenSSL 路径。麒麟旧 Mesa 使用 GTK3 与 SwiftShader，不添加会被上游辅助进程过滤器误判的 `--disable-gpu` 或 `--disable-setuid-sandbox` 参数。登录授权仍须由用户在新客户端中完成，不能仅以进程存在判定登录成功。
+
+Cockpit 启动器清除从父进程继承的 `CODEX_HOME` 和 `CODEX_ELECTRON_USER_DATA_PATH`，使默认账号写入与默认客户端都使用 `~/.codex`；显式创建的受管实例和临时登录目录仍由 Cockpit 在启动客户端时设置。不会自动迁移或覆盖旧并行目录中的账号。
+
+新安装及 `--repair` 会在兼容环境内重新查询合并后的 GTK 输入法模块，生成包含宿主 Fcitx 的 `immodules.cache`，并保留桌面会话的 `GTK_IM_MODULE` 与 `XMODIFIERS`。Ubuntu 原始缓存不包含麒麟宿主的 Fcitx，会导致文本框无法中文输入。修复后需要退出并重开 Cockpit，才会重新创建输入上下文。
 
 仅修复 GSettings 缓存可使用 `--refresh-schemas PREFIX`。修复脚本不会修改 Cockpit 账号、客户端账号或系统库。
 

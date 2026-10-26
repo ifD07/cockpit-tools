@@ -134,6 +134,32 @@ def install_launchers(prefix, source, codex_client=None):
     os.replace(pending, metadata)
 
 
+def rebuild_input_method_cache(prefix):
+    """Query the merged GTK modules using the same libraries as the app."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("kylin_launcher", prefix / "launcher.py")
+    launcher = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(launcher)
+    relative = Path("usr/lib/x86_64-linux-gnu/gtk-3.0/3.0.0")
+    modules = sorted((prefix / "merged" / relative / "immodules").glob("*.so"))
+    query = "/usr/lib/x86_64-linux-gnu/libgtk-3-0/gtk-query-immodules-3.0"
+    arguments = [query, *["/" + str(relative / "immodules" / path.name) for path in modules]]
+    result = subprocess.run(launcher.command(prefix, arguments, shutil.which("bwrap")),
+                            env=launcher.runtime_environment(prefix), text=True,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+    # Querying can return success even when one module fails to load.
+    if '"fcitx"' not in result.stdout and any(p.name == "im-fcitx.so" for p in modules):
+        raise RuntimeError("Fcitx GTK module failed to load: " + result.stderr)
+    cache = prefix / "gtk-immodules.cache"
+    pending = prefix / "gtk-immodules.cache.new"
+    pending.write_text(result.stdout)
+    os.replace(pending, cache)
+    merged_cache = prefix / "merged" / relative / "immodules.cache"
+    pending_link = merged_cache.with_name(".immodules.cache.kylin")
+    pending_link.symlink_to(cache)
+    os.replace(pending_link, merged_cache)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("runtime", type=Path, nargs="?")
@@ -152,6 +178,7 @@ def main():
         rebuild_schema_cache(prefix)
         if args.repair:
             install_launchers(prefix, Path(__file__).resolve().parent, args.codex_client)
+            rebuild_input_method_cache(prefix)
         print("Merged GSettings cache rebuilt:", prefix)
         return
     if not args.runtime or not args.sha256:
@@ -197,6 +224,7 @@ def main():
         "method": "bubblewrap-private-runtime", "systemLibrariesChanged": False,
     }, indent=2) + "\n")
     install_launchers(prefix, source, args.codex_client)
+    rebuild_input_method_cache(prefix)
     subprocess.run([str(prefix / "launcher.py"), "--kylin-check"], check=True)
     bin_dir = Path.home() / ".local/bin"
     bin_dir.mkdir(parents=True, exist_ok=True)

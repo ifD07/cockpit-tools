@@ -23,6 +23,50 @@ host_client = load("host-client")
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_main_client_flags_are_not_classified_as_chromium_helpers(self):
+        args = host_client.client_arguments(["--user-data-dir=/profile"])
+        for word in ("gpu", "sandbox", "helper", "renderer", "utility", "crashpad"):
+            self.assertNotIn(word, " ".join(args))
+        self.assertEqual(args.count("--gtk-version=3"), 1)
+        self.assertEqual(host_client.client_arguments(args), args)
+
+    def test_cockpit_does_not_inherit_parallel_account_directories(self):
+        env = launcher.runtime_environment(Path("/app"), {
+            "CODEX_HOME": "/old-client/home", "CODEX_ELECTRON_USER_DATA_PATH": "/old-client/data",
+            "GTK_IM_MODULE": "fcitx", "XMODIFIERS": "@im=fcitx",
+        })
+        self.assertNotIn("CODEX_HOME", env)
+        self.assertNotIn("CODEX_ELECTRON_USER_DATA_PATH", env)
+        self.assertEqual(env["GTK_IM_MODULE"], "fcitx")
+        self.assertEqual(env["XMODIFIERS"], "@im=fcitx")
+
+    @unittest.skipUnless(shutil.which("bwrap") and shutil.which("xdg-dbus-proxy")
+                         and Path("/usr/lib/x86_64-linux-gnu/gtk-3.0/3.0.0/immodules/im-fcitx.so").is_file(),
+                         "Host Fcitx GTK3 module and namespace helpers are required")
+    def test_input_cache_registers_host_fcitx_without_modifying_original(self):
+        with tempfile.TemporaryDirectory() as directory:
+            prefix = Path(directory)
+            binaries = prefix / "runtime/usr/bin"
+            binaries.mkdir(parents=True)
+            (prefix / "runtime/etc").mkdir()
+            (prefix / "host").mkdir()
+            (prefix / "runtime/etc/ld.so.cache").symlink_to("/etc/ld.so.cache")
+            for helper in ("bwrap", "xdg-dbus-proxy"):
+                (binaries / helper).symlink_to(shutil.which(helper))
+            (binaries / "cockpit-tools").touch()
+            (binaries / "cockpit-tools.real").symlink_to("/usr/bin/readlink")
+            (prefix / "installation.json").write_text(json.dumps({"mounts": []}))
+            installer.install_launchers(prefix, Path(__file__).parent)
+            merged = prefix / "merged/usr/lib/x86_64-linux-gnu/gtk-3.0/3.0.0"
+            (merged / "immodules").mkdir(parents=True)
+            (merged / "immodules/im-fcitx.so").touch()
+            original = prefix / "original.cache"
+            original.write_text("old Ubuntu cache")
+            (merged / "immodules.cache").symlink_to(original)
+            installer.rebuild_input_method_cache(prefix)
+            self.assertIn('"fcitx"', (merged / "immodules.cache").read_text())
+            self.assertEqual(original.read_text(), "old Ubuntu cache")
+
     def test_host_client_preserves_isolated_login_and_uses_own_cli_and_openssl(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -96,8 +140,11 @@ class RuntimeTests(unittest.TestCase):
             installer.install_launchers(prefix, Path(__file__).parent, program)
             home = prefix / "isolated-home"
             home.mkdir()
-            env = launcher.runtime_environment(prefix, dict(os.environ, CODEX_HOME=str(home),
-                CODEX_ELECTRON_USER_DATA_PATH=str(prefix / "isolated-electron")))
+            env = launcher.runtime_environment(prefix)
+            # Cockpit sets these for an explicitly managed instance after its
+            # own launcher has removed inherited parallel-profile overrides.
+            env.update(CODEX_HOME=str(home),
+                       CODEX_ELECTRON_USER_DATA_PATH=str(prefix / "isolated-electron"))
             script = 'readlink /proc/$$/exe; printf "%s\\n" "$CODEX_HOME" "$CODEX_ELECTRON_USER_DATA_PATH"; mkdir "$CODEX_HOME/created"'
             result = subprocess.run(launcher.command(prefix, [str(program), "-c", script],
                 shutil.which("bwrap")), env=env, text=True, capture_output=True)
